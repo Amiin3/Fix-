@@ -1,3 +1,4 @@
 .env
 *.tar.gz
 *.zip
+storage/logs/*.log
