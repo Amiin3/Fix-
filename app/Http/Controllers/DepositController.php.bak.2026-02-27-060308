@@ -1,0 +1,68 @@
+<?php
+namespace App\Http\Controllers;
+
+use Illuminate\Http\Request;
+use Inertia\Inertia;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Auth;
+
+class DepositController extends Controller
+{
+    public function index(Request $request)
+    {
+        // Menggunakan user_id sesuai hasil migration DONE tadi
+        $history = DB::table('deposits')
+            ->where('user_id', Auth::id()) 
+            ->orderBy('id', 'desc')
+            ->limit(5)
+            ->get();
+
+        return Inertia::render('Deposit/Index', [
+            'history' => $history,
+            'errorMsg' => session('error'),
+            'successMsg' => session('success')
+        ]);
+    }
+
+    public function store(Request $request)
+    {
+        $request->validate([
+            'jumlah' => 'required|numeric|min:1000',
+            'metode' => 'required|string'
+        ]);
+
+        $jumlah_input = $request->jumlah;
+        $metode = $request->metode;
+        $user_id = Auth::id(); 
+
+        // Logika Kode Unik Anti-Bentrok
+        do {
+            $kode_unik = rand(1, 999);
+            $total_bayar = $jumlah_input + $kode_unik;
+            
+            $cek = DB::table('deposits')
+                ->where('total_bayar', $total_bayar)
+                ->where('status', 'Pending')
+                ->exists();
+        } while ($cek);
+
+        try {
+            // Insert menggunakan kolom sesuai migration: user_id dan tanggal
+            DB::table('deposits')->insert([
+                'user_id' => $user_id,
+                'amount' => $jumlah_input,
+                'kode_unik' => $kode_unik,
+                'total_bayar' => $total_bayar,
+                'metode' => $metode,
+                'status' => 'Pending',
+                'tanggal' => now(),
+                'updated_at' => now(),
+            ]);
+
+            return back()->with('success', 'Tagihan berhasil dibuat! Silakan transfer sesuai nominal.');
+        } catch (\Exception $e) {
+            \Log::error('Deposit Error: ' . $e->getMessage());
+            return back()->with('error', 'Gagal membuat tagihan: ' . $e->getMessage());
+        }
+    }
+}

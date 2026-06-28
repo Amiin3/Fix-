@@ -1,0 +1,61 @@
+import EnablePush from '@/Components/EnablePush';
+import { Link, usePage } from '@inertiajs/react';
+import NotificationBell from "@/Components/NotificationBell";
+import NotificationBadge from "@/Components/NotificationBadge";
+import AppLock from '@/Components/AppLock'; // 🚀 SUNTIKAN SULTAN: Panggil Satpam Layar
+
+export default function AuthenticatedLayout({ children }) {
+    const { url } = usePage();
+    const showBottomNav = route().current('dashboard') || route().current('riwayat') || route().current('deposit.index') || route().current('profile.edit');
+
+    return (
+        /* 🚀 BUNGKUS SEMUANYA PAKE APPLOCK! */
+        <AppLock>
+            <div className="min-h-screen bg-[#F4F7FB] relative pb-28 sm:pb-0">
+                <main>
+                    <div className="max-w-7xl mx-auto sm:px-6 lg:px-8 mt-4 print:hidden">
+                        <EnablePush />
+                    </div>
+                    {children}
+                </main>
+
+                {/* 🚀 BOTTOM NAVIGATION BAR (FLOATING KAPSUL SULTAN) */}
+                {showBottomNav && (
+                    <div className="fixed bottom-6 left-0 right-0 w-full z-[100] flex justify-center px-5 pointer-events-none sm:hidden print:hidden">
+                        <div className="w-full max-w-[360px] bg-white/90 backdrop-blur-xl shadow-[0_15px_40px_rgba(0,0,0,0.12)] rounded-full flex justify-between items-center p-2 border border-white pointer-events-auto relative">
+                            {/* 🏠 MENU HOME */}
+                            <Link href={route('dashboard')} className={`flex items-center gap-2 px-5 py-3 rounded-full transition-all active:scale-95 ${route().current('dashboard') ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-lg shadow-blue-500/30' : 'text-slate-400 hover:text-blue-600 hover:bg-slate-50'}`}>
+                                <i className="fa-solid fa-house text-sm"></i>
+                                {route().current('dashboard') && <span className="text-[10px] font-black tracking-widest uppercase">Home</span>}
+                            </Link>
+
+                            {/* 🕒 MENU RIWAYAT */}
+                            <Link href="/riwayat" className={`flex flex-col items-center justify-center transition-colors w-12 group ${url.startsWith('/riwayat') ? 'text-blue-600' : 'text-slate-400 hover:text-blue-600'}`}>
+                                <i className={`fa-solid fa-clock-rotate-left text-[20px] transition-transform ${url.startsWith('/riwayat') ? '-translate-y-1' : 'group-hover:-translate-y-1'}`}></i>
+                            </Link>
+
+                            {/* 🔔 TOMBOL TENGAH (NOTIFIKASI) MENONJOL */}
+                            <div className="relative w-12 flex justify-center">
+                                <Link href="/notifikasi" className="absolute -top-10 w-14 h-14 bg-gradient-to-tr from-sky-400 to-blue-600 text-white rounded-full flex items-center justify-center shadow-xl shadow-blue-500/40 border-4 border-[#F4F7FB] active:scale-95 transition-transform hover:-translate-y-1">
+                                    <NotificationBell />
+                                    {/* Efek Titik Merah Berkedip */}
+                                    <span className="absolute top-3 right-3 w-2.5 h-2.5 bg-rose-500 rounded-full border border-white animate-pulse"></span>
+                                </Link>
+                            </div>
+
+                            {/* 💳 MENU DEPOSIT */}
+                            <Link href={route('deposit.index')} className={`flex flex-col items-center justify-center transition-colors w-12 group ${route().current('deposit.index') ? 'text-blue-600' : 'text-slate-400 hover:text-blue-600'}`}>
+                                <i className={`fa-solid fa-wallet text-[20px] transition-transform ${route().current('deposit.index') ? '-translate-y-1' : 'group-hover:-translate-y-1'}`}></i>
+                            </Link>
+
+                            {/* 👤 MENU PROFIL */}
+                            <Link href={route('profile.edit')} className={`flex flex-col items-center justify-center transition-colors w-12 group mr-2 ${route().current('profile.edit') ? 'text-blue-600' : 'text-slate-400 hover:text-blue-600'}`}>
+                                <i className={`fa-solid fa-user text-[20px] transition-transform ${route().current('profile.edit') ? '-translate-y-1' : 'group-hover:-translate-y-1'}`}></i>
+                            </Link>
+                        </div>
+                    </div>
+                )}
+            </div>
+        </AppLock>
+    );
+}

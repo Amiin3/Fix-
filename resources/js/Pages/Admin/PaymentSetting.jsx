@@ -1,0 +1,131 @@
+import React from 'react';
+import { Head, useForm } from '@inertiajs/react';
+
+export default function PaymentSetting({ methods }) {
+    // Form handling menggunakan Inertia useForm
+    const { data, setData, post, processing, recentStatus } = useForm({
+        methods: methods || []
+    });
+
+    const handleInputChange = (index, field, value) => {
+        const updatedMethods = [...data.methods];
+        updatedMethods[index][field] = value;
+        setData('methods', updatedMethods);
+    };
+
+    const submit = (e) => {
+        e.preventDefault();
+        post('/admin/payment-settings', {
+            preserveScroll: true,
+            onSuccess: () => alert('Konfigurasi MilaPay Berhasil Disimpan!'),
+        });
+    };
+
+    return (
+        <div className="p-4 md:p-8 bg-slate-50 min-h-screen font-sans">
+            <Head title="MilaPay V12 Settings" />
+            
+            <div className="max-w-5xl mx-auto">
+                <div className="bg-white rounded-[2.5rem] shadow-2xl border border-slate-200 overflow-hidden">
+                    
+                    {/* Header Admin */}
+                    <div className="bg-slate-900 p-8 text-white flex flex-col md:flex-row justify-between items-center gap-4">
+                        <div>
+                            <h1 className="text-3xl font-black italic tracking-tighter uppercase">
+                                MILA<span className="text-yellow-400">PAY</span> <span className="text-indigo-400 text-xl">V12</span>
+                            </h1>
+                            <p className="text-slate-400 text-[10px] font-bold uppercase tracking-[0.2em] mt-1">Payment Gateway Control Center</p>
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <span className="flex h-3 w-3">
+                                <span className="animate-ping absolute inline-flex h-3 w-3 rounded-full bg-green-400 opacity-75"></span>
+                                <span className="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span>
+                            </span>
+                            <span className="text-[10px] font-black uppercase tracking-widest text-green-400">System Live & Synchronized</span>
+                        </div>
+                    </div>
+
+                    <form onSubmit={submit} className="p-6 md:p-10 space-y-8">
+                        
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            {data.methods.map((method, index) => (
+                                <div key={method.id} className="group relative bg-slate-50 rounded-[2rem] p-6 border border-slate-100 hover:border-indigo-300 transition-all duration-300 shadow-sm hover:shadow-xl hover:shadow-indigo-50/50">
+                                    
+                                    {/* Label Tipe */}
+                                    <div className="absolute top-4 right-6 flex items-center gap-2">
+                                        <span className={`px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-tighter ${method.type === 'QRIS' ? 'bg-indigo-100 text-indigo-600' : 'bg-orange-100 text-orange-600'}`}>
+                                            {method.type} MODE
+                                        </span>
+                                    </div>
+
+                                    <div className="space-y-4 mt-2">
+                                        {/* Nama Metode */}
+                                        <div>
+                                            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Nama Tampilan Website</label>
+                                            <input 
+                                                type="text"
+                                                className="w-full mt-1 p-3 bg-white border-2 border-slate-100 rounded-xl text-sm font-bold text-slate-700 focus:ring-0 focus:border-indigo-500 transition-all shadow-sm"
+                                                value={method.name}
+                                                onChange={(e) => handleInputChange(index, 'name', e.target.value)}
+                                            />
+                                        </div>
+
+                                        {/* Value: No Rekening / Payload */}
+                                        <div>
+                                            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">
+                                                {method.type === 'QRIS' ? 'Payload Static QRIS (Raw)' : 'Nomor Rekening'}
+                                            </label>
+                                            <textarea 
+                                                className="w-full mt-1 p-3 bg-white border-2 border-slate-100 rounded-xl text-xs font-mono text-slate-600 focus:ring-0 focus:border-indigo-500 transition-all shadow-sm"
+                                                rows={method.type === 'QRIS' ? 3 : 1}
+                                                value={method.value || ''}
+                                                onChange={(e) => handleInputChange(index, 'value', e.target.value)}
+                                                placeholder={method.type === 'QRIS' ? "000201010211..." : "Masukkan No Rek..."}
+                                            />
+                                        </div>
+
+                                        {/* Holder: Atas Nama */}
+                                        <div>
+                                            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Atas Nama (Owner)</label>
+                                            <input 
+                                                type="text"
+                                                className="w-full mt-1 p-3 bg-white border-2 border-slate-100 rounded-xl text-sm font-bold text-slate-700 focus:ring-0 focus:border-indigo-500 transition-all shadow-sm"
+                                                value={method.holder || ''}
+                                                onChange={(e) => handleInputChange(index, 'holder', e.target.value)}
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+
+                        {/* Submit Button */}
+                        <div className="pt-6 border-t border-slate-100">
+                            <button 
+                                type="submit" 
+                                disabled={processing}
+                                className="group relative w-full bg-slate-900 text-white font-black py-5 rounded-[2rem] overflow-hidden transition-all hover:bg-indigo-700 active:scale-[0.98] shadow-2xl shadow-slate-200"
+                            >
+                                <div className="relative z-10 flex items-center justify-center gap-2 tracking-[0.2em]">
+                                    {processing ? 'SYNCING DATA...' : '🚀 UPDATE & SIMPAN KONFIGURASI'}
+                                </div>
+                                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent -translate-x-full group-hover:animate-[shimmer_1.5s_infinite]"></div>
+                            </button>
+                        </div>
+
+                    </form>
+                </div>
+
+                <p className="text-center mt-8 text-[10px] text-slate-400 font-bold uppercase tracking-[0.3em]">
+                    MilaPay Secure Engine &copy; 2026
+                </p>
+            </div>
+
+            <style dangerouslySetInnerHTML={{ __html: `
+                @keyframes shimmer {
+                    100% { transform: translateX(100%); }
+                }
+            `}} />
+        </div>
+    );
+}

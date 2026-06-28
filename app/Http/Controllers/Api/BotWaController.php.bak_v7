@@ -1,0 +1,510 @@
+<?php
+namespace App\Http\Controllers\Api;
+
+use App\Http\Controllers\Controller;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
+use App\Services\KajeService;
+use App\Services\DigiflazzService;
+use App\Services\AdammediaService;
+
+class BotWaController extends Controller
+{
+    protected $botKey = 'MILA_SEC_v9B4xK8mP2qL7jW5nC3zR1hT6fD0yX5g';
+    
+    private function getPrioritas($kode) {
+        $prioMap = ['CFMX'=>0, 'XLA89'=>1, 'XLA14'=>2, 'XLA32'=>3, 'XLA39'=>4, 'XLA51'=>5, 'XLA65'=>6];
+        return $prioMap[strtoupper($kode)] ?? 99;
+    }
+    
+    private function getDesc($p) {
+        $desc = $p->deskripsi ?? $p->catatan ?? '';
+        if (empty($desc)) return '';
+        
+        $cleanDesc = trim(strip_tags(str_replace(['<br>', '<br/>', '<br />'], "\n", $desc)));
+        $lines = explode("\n", $cleanDesc);
+        $finalLines = [];
+        
+        foreach ($lines as $line) {
+            $tLine = trim($line); if (empty($tLine)) continue;
+            if (preg_match('/(Bisa ke XL|Resmi|Bergaransi|tanggung jawab|myRewerd|PRIORITAS|otomatis ke kick|Kesalahan nomor)/i', $tLine)) continue;
+            
+            if (strpos($tLine, '|') !== false) {
+                $areas = explode('|', $tLine);
+                foreach($areas as $area) {
+                    $cleanArea = trim(str_replace([':', '-'], '=', $area));
+                    if(!empty($cleanArea)) $finalLines[] = "▪️ " . $cleanArea;
+                }
+            } else {
+                $cleanLine = trim(str_replace([':', '-'], '=', $tLine));
+                if (stripos($cleanLine, 'Global') !== false) {
+                    $finalLines[] = "🌐 " . $cleanLine;
+                } else {
+                    $finalLines[] = "▪️ " . $cleanLine;
+                }
+            }
+        }
+        
+        if (empty($finalLines)) return '';
+        return "\n  └ 📝 *Detail Kuota:*\n      " . implode("\n      ", array_slice($finalLines, 0, 15));
+    }
+    
+    private function generateQrisCrc($str) {
+        $crc = 0xFFFF;
+        for ($i = 0; $i < strlen($str); $i++) {
+            $crc ^= (ord($str[$i]) << 8);
+            for ($j = 0; $j < 8; $j++) {
+                if ($crc & 0x8000) { $crc = ($crc << 1) ^ 0x1021; } else { $crc = $crc << 1; }
+            }
+        }
+        $crc &= 0xFFFF;
+        return strtoupper(str_pad(dechex($crc), 4, '0', STR_PAD_LEFT));
+    }
+    
+    private function makeDynamicQris($staticQris, $amount) {
+        $qris = substr($staticQris, 0, -4);
+        $qris = str_replace('010211', '010212', $qris);
+        $amtStr = (string)$amount;
+        $amtLen = str_pad(strlen($amtStr), 2, '0', STR_PAD_LEFT);
+        $tag54 = "54" . $amtLen . $amtStr;
+        if (strpos($qris, '5802ID') !== false) { $qris = str_replace('5802ID', $tag54 . '5802ID', $qris); } else { $qris .= $tag54; }
+        return $qris . $this->generateQrisCrc($qris);
+    }
+    
+    public function handle(Request $request)
+    {
+
+            // --- REAL AI GEMINI & REGISTRASI FIX ---
+            // 1. DETEKSI PARAMETER REQUEST SECARA AGRESIF (Mendukung Semua Vendor Gateway WA)
+            $pesanAsli = request('pesan') ?? request('message') ?? request('text') ?? request('msg') ?? request('data') ?? '';
+            $no_wa = request('nomor') ?? request('sender') ?? request('from') ?? request('phone') ?? request('whatsapp') ?? '';
+            
+            // Ambil fallback jika variabel dilewatkan via parameter fungsi $request Laravel
+            if (empty($pesanAsli) && isset($request)) {
+                $pesanAsli = $request->pesan ?? $request->message ?? $request->text ?? $request->msg ?? '';
+            }
+            if (empty($no_wa) && isset($request)) {
+                $no_wa = $request->nomor ?? $request->sender ?? $request->from ?? $request->phone ?? $request->whatsapp ?? '';
+            }
+
+            $pesanBersih = trim($pesanAsli);
+            $no_wa = preg_replace('/[^0-9]/', '', str_replace('@c.us', '', $no_wa));
+
+            if ($pesanBersih !== '' && $no_wa !== '') {
+                $parts = explode(' ', $pesanBersih);
+                $cmdRawAi = strtolower($parts[0] ?? '');
+                $isDotAi = (str_starts_with($pesanBersih, '.'));
+                $cmdAi = ltrim($cmdRawAi, '.');
+
+                // RESPONDER ENGINE UNIVERSAL (Mengirimkan payload JSON terlengkap + teks murni secara simultan)
+                $sendResponse = function($msg) use ($request) {
+                    if (request()->wantsJson() || request()->is('api/*') || (isset($request) && method_exists($request, 'expectsJson') && $request->expectsJson())) {
+                        return response()->json([
+                            'status' => true,
+                            'message' => $msg,
+                            'text' => $msg,
+                            'reply' => $msg,
+                            'data' => ['reply' => $msg, 'message' => $msg, 'text' => $msg]
+                        ]);
+                    }
+                    return response($msg, 200)->header('Content-Type', 'text/plain');
+                };
+
+                // VALIDASI DATABASE MITRA (Mendukung multispesifikasi nama kolom lokal)
+                $user = \Illuminate\Support\Facades\DB::table('users')
+                    ->where('whatsapp', $no_wa)
+                    ->orWhere('phone', $no_wa)
+                    ->orWhere('telepon', $no_wa)
+                    ->first();
+
+                // ENGINE PINTAR AI GEMINI
+                $callGemini = function($prompt) {
+                    $key = env('GEMINI_API_KEY');
+                    if (empty($key)) return "⚠️ *SYSTEM ERROR:* API Key Gemini belum diisi di file .env!";
+                    try {
+                        $res = \Illuminate\Support\Facades\Http::timeout(12)->post("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" . $key, [
+                            'contents' => [['parts' => [['text' => $prompt]]]]
+                        ]);
+                        return $res->json()['candidates'][0]['content']['parts'][0]['text'] ?? null;
+                    } catch (\Exception $e) { 
+                        return null; 
+                    }
+                };
+
+                // ==========================================
+                // BLOK 1: FITUR REGISTRASI (USER BELUM DAFTAR)
+                // ==========================================
+                if (!$user) {
+                    if ($cmdAi === 'daftar' || $cmdAi === 'register') {
+                        if (count($parts) < 3) {
+                            return $sendResponse("Halo Kak! 👋\nFormat pendaftaran belum lengkap.\n\nSilakan ketik:\n`.daftar [Email_Aktif] [Nama_Toko]`\n\n💡 *Contoh:* \n`.daftar milastore@gmail.com Mila Cell`");
+                        }
+                        
+                        $emailReg = $parts[1];
+                        if (!filter_var($emailReg, FILTER_VALIDATE_EMAIL)) {
+                            return $sendResponse("❌ *Pendaftaran Gagal:* Alamat email tidak valid!");
+                        }
+                        if (\Illuminate\Support\Facades\DB::table('users')->where('email', $emailReg)->first()) {
+                            return $sendResponse("❌ *Pendaftaran Gagal:* Email ini sudah terdaftar!");
+                        }
+
+                        $namaTokoReg = implode(' ', array_slice($parts, 2));
+                        $otpCode = mt_rand(100000, 999999);
+                        $defaultPassword = 'Mila' . mt_rand(1000, 9999);
+
+                        try {
+                            \Illuminate\Support\Facades\DB::table('users')->insert([
+                                'name' => $namaTokoReg, 'email' => $emailReg, 'whatsapp' => $no_wa, 'phone' => $no_wa,
+                                'password' => \Illuminate\Support\Facades\Hash::make($defaultPassword), 'level' => 'Member',
+                                'saldo' => 0, 'status' => 'pending', 'otp_code' => $otpCode, 'api_key' => \Illuminate\Support\Str::random(30),
+                                'created_at' => date('Y-m-d H:i:s'), 'updated_at' => date('Y-m-d H:i:s')
+                            ]);
+                            return $sendResponse("🎉 *PENDAFTARAN SUKSES!*\n\nData Anda telah berhasil disimpan.\n\n🔑 *KODE OTP ANDA:* `$otpCode`\n\nSilakan verifikasi akun Anda dengan mengetik:\n`.verifikasi $otpCode $defaultPassword`");
+                        } catch (\Exception $e) {
+                            return $sendResponse("❌ *DATABASE ERROR:* Hubungi Admin Utama.");
+                        }
+                    }
+                    
+                    // Respon AI Otomatis untuk Mengajak Pendaftaran Akun jika nomor baru menyapa
+                    $aiResp = $callGemini("Kamu adalah CS Virtual resmi MilaStore (Sistem Agen Top Up Game & PPOB H2H). Ada nomor baru belum terdaftar mengirim pesan kasual: '$pesanAsli'. Jawab dengan sangat ramah, santun, super singkat, lalu arahkan dia untuk mendaftar menggunakan format wajib bertanda titik: '.daftar email nama_toko'.");
+                    if ($aiResp) {
+                        return $sendResponse("🤖 *Mila AI - MILASTORE*\n\n" . trim($aiResp));
+                    }
+                    return $sendResponse("Halo Kak! 👋\nNomor Anda belum terdaftar di MilaStore. Yuk join sekarang!\n\nKetik format pendaftaran:\n`.daftar email_kakak@gmail.com Nama Toko`");
+                }
+
+                // ==========================================
+                // BLOK 2: VERIFIKASI OTP (USER STATUS PENDING)
+                // ==========================================
+                if ($user->status === 'pending') {
+                    if ($cmdAi === 'verifikasi' && isset($parts[1]) && $parts[1] == $user->otp_code) {
+                        $passWeb = $parts[2] ?? '123456';
+                        \Illuminate\Support\Facades\DB::table('users')->where('id', $user->id)->update([
+                            'status' => 'aktif', 'otp_code' => null, 'wa_verified_at' => date('Y-m-d H:i:s')
+                        ]);
+                        
+                        $msgSukses = "🎉 *VERIFIKASI AKUN SUKSES!* 🎉\nSelamat datang di MILASTORE, *{$user->name}*!\n\n";
+                        $msgSukses .= "Akun Anda saat ini telah aktif dan sinkron ke Web Server.\n\n";
+                        $msgSukses .= "🌐 *Link Login Web:* https://milastore.cloud/login\n";
+                        $msgSukses .= "📧 *Email/ID:* {$user->email}\n";
+                        $msgSukses .= "🔑 *Password Web:* `$passWeb`\n\n";
+                        $msgSukses .= "_Silakan login ke web untuk melengkapi profile Anda._\n\n";
+                        $msgSukses .= "Ketik *.menu* pada WhatsApp ini untuk melihat katalog produk h2h! 🚀";
+                        return $sendResponse($msgSukses);
+                    }
+                    return $sendResponse("⚠️ *AKUN BELUM AKTIF*\n\nHarap lakukan verifikasi OTP terlebih dahulu.\nKetik: `.verifikasi {$user->otp_code}`");
+                }
+
+                // ==========================================
+                // BLOK 3: ASISTEN CHAT AI (USER SUDAH AKTIF)
+                // ==========================================
+                $sysCmds = ['depo', 'deposit', 'order', 'beli', 'batal', 'menu', 'ping', 'help', 'saldo', 'cek', 'tagihan'];
+                
+                // Cek jika pengguna chat biasa atau lupa memberi tanda titik pada perintah bawaan web
+                if (!in_array($cmdAi, $sysCmds) || (in_array($cmdAi, $sysCmds) && !$isDotAi)) {
+                    $prompt = "Kamu Mila AI, asisten resmi MilaStore (Aplikasi PPOB & Agen Kuota). Pengguna terdaftar bernama '{$user->name}' mengirim pesan: '$pesanAsli'. Jawab ramah, padat, langsung ke inti. Jika dia bertanya cara transaksi, ingatkan aturan format wajib pakai titik: \n- Topup Saldo: .depo nominal\n- Beli Produk: .order kode_produk tujuan\n- Cek Katalog: .menu\nIngatkan selalu memakai tanda titik (.) di awal perintah.";
+                    $aiResp = $callGemini($prompt);
+                    
+                    if ($aiResp) {
+                        return $sendResponse("🤖 *Mila AI - MILASTORE*\n\n" . trim($aiResp));
+                    }
+                }
+            }
+            // --- END REAL AI ---
+            
+            
+        try {
+            date_default_timezone_set('Asia/Jakarta');
+            if ($request->header('X-API-KEY') !== $this->botKey) { return response()->json(['status' => false, 'message' => '❌   Akses Ditolak!']); }
+            
+            $command = $request->command;
+            $raw_wa = $request->no_wa;
+            $no_wa = preg_replace("/[^0-9]/", "", explode("@", $raw_wa)[0]);
+            
+            if (empty($no_wa) || strlen($no_wa) < 9) return response()->json(["status" => false, "message" => "❌  Nomor pengirim tidak valid!"]);
+            $indo_num = (substr($no_wa, 0, 2) == "62") ? "0" . substr($no_wa, 2) : $no_wa;
+            $user = DB::table('users')->where('whatsapp', $no_wa)->orWhere('phone', $no_wa)->orWhere('phone', $indo_num)->first();
+
+            
+
+            
+            
+
+            
+
+            
+
+            
+
+            
+
+            
+
+            
+            
+            if ($command === 'auto_otp' || $command === 'login') {
+                $otp_input = trim($request->otp ?? '');
+                if ($command === 'auto_otp') {
+                    $userV = DB::table('users')->where('otp_code', $otp_input)->first();
+                    if (!$userV) return response()->json(['status' => false, 'message' => "❌   *KODE OTP SALAH/DITOLAK!*\nSistem mendeteksi aktivitas mencurigakan atau kode salah."]);
+                    DB::table('users')->where('id', $userV->id)->update(['whatsapp' => $no_wa, 'otp_code' => null]);
+                    return response()->json(['status' => true, 'message' => "✅   *LOGIN BERHASIL!*\nSelamat datang kembali di MilaStore.\n\nKetik `p` untuk melihat menu."]);
+                }
+                $target = trim($request->target_number);
+                $indo_num_login = (substr($target, 0, 2) == '62') ? '0' . substr($target, 2) : $target;
+                $wa_num_login = (substr($target, 0, 1) == '0') ? '62' . substr($target, 1) : $target;
+                $userL = DB::table('users')->where('phone', $indo_num_login)->orWhere('whatsapp', $indo_num_login)->first();
+                if (!$userL) return response()->json(['status' => false, 'message' => "❌   *NOMOR TIDAK TERDAFTAR.*\nPastikan nomor terdaftar di web MilaStore."]);
+                $otp = rand(111111, 999999);
+                DB::table('users')->where('id', $userL->id)->update(['otp_code' => $otp, 'otp_expires_at' => now()->addMinutes(30)]);
+                return response()->json(['status' => true, 'target_wa' => $wa_num_login . '@s.whatsapp.net', 'otp_message' => "🔐 *OTP MILASTORE*\n\nKode OTP: *{$otp}*", 'reply_message' => "⏳   OTP terkirim ke WA *{$indo_num_login}*.\n\nBalas dengan *6 digit angka OTP*."]);
+            }
+            if (!$user) return response()->json(['status' => false, 'message' => "❌   *SESI BELUM TERHUBUNG*\n\nSilakan login terlebih dahulu.\nKetik: `.login [NOMOR_HP]`\nContoh: `.login 08123456789`"]);
+            
+            // === LOAD DATA ===
+            $akrabXla = DB::table('layanan_khfy')->where('kode_layanan', 'like', 'XLA%')->orderBy('harga_jual', 'asc')->get();
+            $akrabXda = DB::table('layanan_kaje')->where(fn($q) => $q->where('kode_layanan', 'like', 'KDA%')->orWhere('kode_layanan', 'like', 'PDA%'))->get()->map(function($item) { preg_match('/(\d+)-/i', $item->nama_layanan, $matches); $item->size = isset($matches[1]) ? (int)$matches[1] : 999; return $item; })->sortBy(function($item) { return sprintf('%03d-%010d', $item->size, $item->harga_jual); })->values();
+            
+            $adamXda = DB::table('ppob_products')->select('id', 'product_code as kode_layanan', 'product_name as nama_layanan', 'price_sell as harga_jual', 'description as deskripsi', 'is_active as status')->where('provider_name', 'ADAMMEDIA')->where('product_code', 'like', '%XDA%')->orderBy('price_sell', 'asc')->get();
+            $adamXclp = DB::table('ppob_products')->select('id', 'product_code as kode_layanan', 'product_name as nama_layanan', 'price_sell as harga_jual', 'description as deskripsi', 'is_active as status')->where('provider_name', 'ADAMMEDIA')->where('product_code', 'like', '%XCLP%')->orderBy('price_sell', 'asc')->get();
+            $adamProducts = $adamXda->concat($adamXclp)->values();
+            
+            $dataDigi = DB::table('layanan')->where(function($q) { $q->where('nama_layanan', 'LIKE', '%edukasi%')->orWhere('nama_layanan', 'LIKE', '%conference%'); })->orderBy('harga_jual', 'asc')->get();
+            $aktifDigi = DB::table('layanan')->where('nama_layanan', 'LIKE', '%masa aktif%')->orderBy('harga_jual', 'asc')->get();
+            
+            if ($command === 'main_menu') {
+                $teks = "*M I L A S T O R E*\n━━━━━━━━━━━━━━━━━━━━━━\n👤 *Akun:* {$user->name}\n💳 *Saldo:* Rp " . number_format($user->saldo, 0, ',', '.') . "\n━━━━━━━━━━━━━━━━━━━━━━\n\n*» KATEGORI PRODUK «*\n*[ 1 ]* ⚡ *AKRAB XL*\n*[ 2 ]* 🚀 *AKRAB V2*\n*[ 3 ]* 🔥 *AKRAB XDA*\n*[ 4 ]* 🌐 *PAKET DATA* (Edu/Conf)\n*[ 5 ]* ⏳ *MASA AKTIF KARTU*\n\n*» PINTASAN CEPAT «*\n*+* `.depo`  ➔ Isi Saldo\n*-* `.batal` ➔ Batal Tiket\n\n_Balas dengan angka *1-5* untuk melihat katalog._";
+                return response()->json(['status' => true, 'message' => $teks]);
+            }
+            
+            if ($command === 'menu_xla') {
+                $stockKhfy = []; try { $res = Http::timeout(3)->get('https://panel.khfy-store.com/api_v3/cek_stock_akrab'); if ($res->successful()) { foreach ($res->json()['data'] as $s) { $stockKhfy[$s['type']] = $s['sisa_slot']; } } } catch (\Exception $e) { }
+                $teks = "┌──[ 💠 *XL AKRAB (XLA)* ]──\n\n";
+                foreach ($akrabXla as $i => $p) { $sisa = $stockKhfy[$p->kode_layanan] ?? '0'; $stIcon = ($sisa > 0) ? '🟢' : '🔴'; $desc = $this->getDesc($p); $teks .= " *[ X".($i+1)." ]* {$p->nama_layanan}\n  └ 🏷️ *Rp " . number_format($p->harga_jual) . "* | 📦 $stIcon *$sisa*{$desc}\n\n"; }
+                $teks .= "└┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n⚡   *ORDER:* `.order [KODE] [NO_HP]`\nContoh: `.order X1 08123...`\n\n↪️ _Ketik *p* untuk kembali_";
+                return response()->json(['status' => true, 'message' => $teks]);
+            }
+            
+            if ($command === 'menu_xda') {
+                $stockKaje = []; try { $kaje = app(KajeService::class); $resK = $kaje->getStock(); if (isset($resK['success']) && $resK['success'] == true) { foreach ($resK['data'] as $p) { $stockKaje[$p['code'] ?? $p['kode_layanan']] = $p['stock'] ?? $p['stok'] ?? 0; } } } catch (\Exception $e) { }
+                $teks = "┌──[ 💠 *AMIFI (KDA/PDA)* ]──\n\n";
+                foreach ($akrabXda as $i => $p) { $sisa = $stockKaje[$p->kode_layanan] ?? $p->stok ?? 0; $stIcon = ($sisa > 0) ? '🟢' : '🔴'; $desc = $this->getDesc($p); $teks .= " *[ A".($i+1)." ]* {$p->nama_layanan}\n  └ 🏷️ *Rp " . number_format($p->harga_jual) . "* | 📦 $stIcon *$sisa*{$desc}\n\n"; }
+                $teks .= "└┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n⚡   *ORDER:* `.order [KODE] [NO_HP]`\nContoh: `.order A1 08123...`\n\n↪️ _Ketik *p* untuk kembali_";
+                return response()->json(['status' => true, 'message' => $teks]);
+            }
+            
+            // MENU V8 VIP
+            if ($command === 'menu_pln') {
+                $stockV8 = []; 
+                try { 
+                    $key = env('ADAMMEDIA_API_KEY');
+                    if (empty($key) && file_exists(base_path('.env'))) {
+                        preg_match('/ADAMMEDIA_API_KEY=(.*)/', file_get_contents(base_path('.env')), $matches);
+                        $key = trim($matches[1] ?? '');
+                    }
+
+                    $reqReg = Http::withHeaders(['x-api-key' => $key])->timeout(10)->get("https://juraganxl.my.id/api/regulers");
+                    if ($reqReg->successful() && is_array($reqReg->json())) {
+                        foreach ($reqReg->json() as $i) {
+                            if (isset($i['config'])) {
+                                $isOpen = $i['open'] ?? true;
+                                $stockV8[strtoupper($i['config'])] = $isOpen ? (int)($i['count'] ?? 0) : 0;
+                            }
+                        }
+                    }
+
+                    $reqCir = Http::withHeaders(['x-api-key' => $key])->timeout(10)->get("https://juraganxl.my.id/api/circles");
+                    if ($reqCir->successful() && is_array($reqCir->json())) {
+                        foreach ($reqCir->json() as $i) {
+                            if (isset($i['config'])) {
+                                $isOpen = $i['open'] ?? true;
+                                $stockV8[strtoupper($i['config'])] = $isOpen ? (int)($i['count'] ?? 0) : 0;
+                            }
+                        }
+                    }
+                } catch (\Exception $e) { }
+
+                $teks = "*AKRAB XDA*\n━━━━━━━━━━━━━━━━━━━━━━\n\n";
+                foreach ($adamXda as $i => $p) {
+                    $sisa = $stockV8[strtoupper($p->kode_layanan)] ?? 0;
+                    $stIcon = ($sisa > 0) ? '🟢' : '🔴';
+                    $desc = $this->getDesc($p);
+                    $teks .= "*[ V".($i+1)." ]* {$p->nama_layanan}\n ↳ 🏷️ *Rp " . number_format($p->harga_jual) . "* | 📦 $stIcon *$sisa*{$desc}\n\n";
+                }
+
+                $teks .= "━━━━━━━━━━━━━━━━━━━━━━\n*» CARA ORDER «*\nKetik: `.order [KODE] [NO_HP]`\nContoh: `.order V1 0812345...`\n\n_Ketik *p* untuk kembali ke Menu Utama._";
+                return response()->json(['status' => true, 'message' => $teks]);
+            }
+            
+            if ($command === 'menu_data') {
+                $teks = "┌──[ 🌐 *PAKET DATA* ]──\n\n";
+                if($dataDigi->isEmpty()) { $teks .= " _(Produk sedang kosong)_\n\n"; }
+                else { foreach ($dataDigi as $i => $p) { $desc = $this->getDesc($p); $teks .= " *[ DT".($i+1)." ]* {$p->nama_layanan}\n  └ 🏷️ *Rp " . number_format($p->harga_jual) . "*{$desc}\n\n"; } }
+                $teks .= "└┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n⚡   *ORDER:* `.order [KODE] [NO_HP]`\nContoh: `.order DT1 0812...`\n\n↪️ _Ketik *p* untuk kembali_";
+                return response()->json(['status' => true, 'message' => $teks]);
+            }
+            
+            if ($command === 'menu_aktif') {
+                $teks = "┌──[ ⏳   *MASA AKTIF KARTU* ]──\n\n";
+                if($aktifDigi->isEmpty()) { $teks .= " _(Produk sedang kosong)_\n\n"; }
+                else { foreach ($aktifDigi as $i => $p) { $desc = $this->getDesc($p); $teks .= " *[ M".($i+1)." ]* {$p->nama_layanan}\n  └ 🏷️ *Rp " . number_format($p->harga_jual) . "*{$desc}\n\n"; } }
+                $teks .= "└┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n⚡   *ORDER:* `.order [KODE] [NO_HP]`\nContoh: `.order M1 0812...`\n\n↪️ _Ketik *p* untuk kembali_";
+                return response()->json(['status' => true, 'message' => $teks]);
+            }
+            
+            if ($command === 'deposit_create') {
+                $rawNominal = strtolower(trim($request->nominal ?? ''));
+                if (str_ends_with($rawNominal, 'k')) { $nominal = (int)str_replace('k', '', $rawNominal) * 1000; } 
+                else { $nominal = (int)preg_replace('/[^0-9]/', '', $rawNominal); }
+                
+                $metode_idx = (int)$request->metode - 1;
+                $all_payments = DB::table('payment_settings')->get();
+                $payments = []; foreach($all_payments as $p) { if ($p->metode !== 'QRIS') { $payments[] = $p; } }
+                $cek_pending = DB::table('deposits')->where('user_id', $user->id)->where('status', 'Pending')->first();
+                
+                if ($cek_pending) {
+                    $pay_active = DB::table('payment_settings')->where('metode', $cek_pending->metode)->first();
+                    $nominal_pending = $cek_pending->total_bayar;
+                    $is_new = false;
+                } else {
+                    if ($nominal < 1000 || !isset($payments[$metode_idx])) {
+                        $msg = "┌──[ 💳 *ISI SALDO MILASTORE* ]──\n\n✨   *CARA CERDAS & CEPAT:*\nCukup ketik salah satu *Kode Metode* di bawah ini, lalu ikuti panduan bot.\n\n🏦 *KODE METODE TERSEDIA:*\n";
+                        foreach($payments as $k => $v) { $icon = str_starts_with($v->metode, 'QRIS') ? '📱' : '🏦'; $msg .= " 👉 *D".($k+1)."* ➔ $icon " . str_replace('_', ' ', $v->metode) . "\n"; }
+                        $msg .= "\n💬 *Contoh Penggunaan:*\nKetik *D1* lalu kirim, bot akan menanyakan nominal kepada Anda.\n──────────────────────\n🛠️ *Cara Manual Lama:*\n`.depo [NOMINAL] [KODE ANGKA]`\nContoh: `.depo 50k 1`\n└┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈";
+                        return response()->json(['status' => false, 'message' => $msg]);
+                    }
+                    $pay_active = $payments[$metode_idx];
+                    $is_new = true;
+                }
+                if ($is_new) {
+                    do { $kode_unik = rand(10, 999); $total_bayar = $nominal + $kode_unik; $cek_dobel = DB::table("deposits")->where("status", "Pending")->where("total_bayar", $total_bayar)->exists(); } while ($cek_dobel);
+                    DB::table("deposits")->insert(["user_id"=>$user->id,"metode"=>$pay_active->metode,"amount"=>$nominal,"kode_unik"=>$kode_unik,"total_bayar"=>$total_bayar,"status"=>"Pending","created_at"=>now(),"updated_at"=>now()]);
+                } else { $total_bayar = $nominal_pending; }
+                
+                $msg = ($is_new) ? "💳 *TIKET DEPOSIT BERHASIL DIBUAT!*\n" : "⏳   *MOHON SELESAIKAN PEMBAYARAN*\n";
+                $msg .= "┌┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n│ 🏦 Metode: *" . str_replace('_', ' ', $pay_active->metode) . "*\n";
+                if ($pay_active) { $msg .= "│ 👤 Nama: *{$pay_active->atas_nama}*\n"; if (!str_starts_with($pay_active->metode, 'QRIS')) { $msg .= "│ 🔢 Rek: *{$pay_active->nomor}*\n"; } }
+                $msg .= "└┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n\nSilakan transfer TEPAT SEBESAR:\n👉 *Rp " . number_format($total_bayar, 0, ',', '.') . "* 👈\n\n⚡   _Sistem deteksi otomatis (1-5 Menit)._\n";
+                if ($pay_active->metode === 'SEABANK') { $msg .= "🚨 *PENTING:* Transfer WAJIB dari sesama rekening SeaBank agar otomatis.\n\n"; } else { $msg .= "⚠️ _Wajib transfer hingga 3 digit terakhir._\n\n"; }
+                $msg .= "⛔   _Ganti nominal? Ketik: `.batal`_";
+                
+                $res_data = ['status' => true];
+                if ($pay_active && str_starts_with($pay_active->metode, 'QRIS')) {
+                    $dq = $this->makeDynamicQris($pay_active->nomor, $total_bayar);
+                    $res_data['image_url'] = "https://api.qrserver.com/v1/create-qr-code/?size=500x500&data=" . urlencode($dq);
+                    $msg = str_replace("👉 *Rp", "⚠️ _Scan Barcode di atas! Nominal sudah otomatis._\n\n👉 *Rp", $msg);
+                }
+                $res_data['message'] = $msg;
+                return response()->json($res_data);
+            }
+            
+            if ($command === 'deposit_cancel') {
+                $p = DB::table('deposits')->where('user_id', $user->id)->where('status', 'Pending')->first();
+                if (!$p) return response()->json(['status'=>false, 'message'=>"❌   *TIDAK ADA TIKET PENDING.*\nSaldo Anda aman."]);
+                DB::table('deposits')->where('id', $p->id)->update(['status'=>'Gagal', 'updated_at'=>now()]);
+                return response()->json(['status'=>true, 'message'=>"✅   *TIKET BERHASIL DIBATALKAN.*\n\nTiket sebesar *Rp ".number_format($p->total_bayar, 0, ',', '.')."* telah dibatalkan.\nSilakan ketik `.depo` untuk membuat tiket baru."]);
+            }
+            
+            // ==========================================
+            // 🛡️ ORDER EKSEKUSI 
+            // ==========================================
+            if ($command === 'order_akrab' || $command === 'war_sikat') {
+                $kode_input = strtoupper($request->kode ?? '');
+                $selected = null;
+                
+                if (preg_match('/^X(\d+)$/', $kode_input, $m)) { $selected = $akrabXla->values()->get((int)$m[1] - 1); }
+                elseif (preg_match('/^A(\d+)$/', $kode_input, $m)) { $selected = $akrabXda->values()->get((int)$m[1] - 1); }
+                elseif (preg_match('/^V(\d+)$/', $kode_input, $m)) { $selected = $adamProducts->get((int)$m[1] - 1); }
+                elseif (preg_match('/^DT(\d+)$/', $kode_input, $m)) { $selected = $dataDigi->values()->get((int)$m[1] - 1); }
+                elseif (preg_match('/^M(\d+)$/', $kode_input, $m)) { $selected = $aktifDigi->values()->get((int)$m[1] - 1); }
+                
+                if (!$selected) return response()->json(['status' => false, 'message' => "❌   *PRODUK TIDAK DITEMUKAN*"]);
+                
+                $isKaje = DB::table('layanan_kaje')->where('kode_layanan', $selected->kode_layanan)->exists();
+                $isDigi = DB::table('layanan')->where('kode_layanan', $selected->kode_layanan)->exists();
+                $isAdam = DB::table('ppob_products')->where('provider_name', 'ADAMMEDIA')->where('product_code', $selected->kode_layanan)->exists();
+                
+                $numbers = array_values(array_unique(array_filter(preg_split('/[\r\n, ]+/', $request->target), fn($n) => strlen(preg_replace('/[^0-9]/', '', $n)) >= 5)));
+                $qty = count($numbers);
+                $total = $selected->harga_jual * $qty;
+                
+                DB::beginTransaction();
+                try {
+                    $dbUser = DB::table('users')->where('id', $user->id)->lockForUpdate()->first();
+                    if ($dbUser->saldo < $total) { DB::rollBack(); return response()->json(['status' => false, 'message' => "❌   *SALDO TIDAK MENCUKUPI*\nSilakan isi saldo terlebih dahulu."]); }
+                    if ($command === 'war_sikat' && ($isKaje || $isDigi)) { DB::rollBack(); return response()->json(['status' => false, 'message' => "❌   *PRODUK INI HANYA MENDUKUNG .ORDER*"]); }
+                    DB::table('users')->where('id', $user->id)->decrement('saldo', $total);
+                    DB::commit();
+                    $sisa_saldo_realtime = $dbUser->saldo - $total;
+                } catch (\Exception $e) { DB::rollBack(); return response()->json(['status' => false, 'message' => '❌   *SYSTEM ERROR LOCKING SALDO*']); }
+                
+                if ($command === 'war_sikat') {
+                    foreach($numbers as $index => $tjn) {
+                        $ref = 'POX-' . time() . '-' . $index;
+                        DB::table('antrian_po')->insert(['ref_id'=>$ref,'username'=>$user->name,'kode_produk'=>$selected->kode_layanan,'tujuan'=>$tjn,'harga'=>$selected->harga_jual,'status'=>'Menunggu','prioritas'=>$this->getPrioritas($selected->kode_layanan),'tanggal'=>now(),'created_at'=>now(),'updated_at'=>now()]);
+                        DB::table('transaksi')->insert(['username'=>$user->name,'ref_id'=>$ref,'kode_layanan'=>$selected->kode_layanan,'tujuan'=>$tjn,'harga'=>$selected->harga_jual,'status'=>'Pending','sn'=>'Antrean WAR','tanggal'=>now(),'created_at'=>now(),'updated_at'=>now()]);
+                    }
+                    $msg = "⚔️ *SISTEM WAR DIAKTIFKAN!* ⚔️\n╭━━━━━━━━━━━━━━━━━━━━━━\n│ 📦 Produk: *{$selected->nama_layanan}*\n│ 🎯 Target: *$qty Nomor*\n└┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n_Sistem akan menembak secara otomatis saat stok tersedia!_";
+                    return response()->json(['status' => true, 'message' => $msg . "\n\n💳 *Sisa Saldo:* Rp " . number_format($sisa_saldo_realtime, 0, ',', '.')]);
+                } else {
+                    $berhasil = 0; $gagal = 0;
+                    foreach($numbers as $tjn) {
+                        $refId = ($isKaje ? "INV-" : ($isDigi ? "DIGI-" : "TRX-")) . date("YmdHis") . rand(100,999);
+                        $is_success = false; $sn_msg = '';
+                        
+                        try {
+                            if ($isKaje) {
+                                $kaje = app(KajeService::class); $res = $kaje->placeOrder($tjn, $selected->kode_layanan, $refId);
+                                if (isset($res['success']) && $res['success'] == true) { $is_success = true; $sn_msg = $res['data']['trx_id']??'KAJE'; }
+                            } elseif ($isDigi) {
+                                $digi = app(DigiflazzService::class); $res = $digi->placeOrder($refId, $tjn, $selected->kode_layanan);
+                                if (isset($res['success']) && $res['success'] == true) { $is_success = true; $sn_msg = 'API Digiflazz'; }
+                            } elseif ($isAdam) {
+                                // 🔥 FIX: LOGIKA TEMBAK ADAMMEDIA YANG BENAR (100% AMAN & LURUS)
+                                try {
+                                    $adam = app(AdammediaService::class); 
+                                    $res = $adam->placeOrder($refId, $tjn, $selected->kode_layanan); // Urutan Benar
+                                    
+                                    if (isset($res['status']) && in_array($res['status'], ['SUKSES', 'PROSES'])) { 
+                                        $is_success = true; 
+                                        $sn_msg = $res['sn'] ?? 'VIP-V8'; 
+                                    } else { 
+                                        $is_success = false;
+                                        $sn_msg = $res['msg'] ?? 'Gagal Server VIP'; 
+                                    }
+                                } catch (\Exception $e) {
+                                    $is_success = false; 
+                                    $sn_msg = 'Timeout Server VIP';
+                                }
+                            } else {
+                                $res = Http::timeout(10)->get('https://panel.khfy-store.com/api_v2/trx', ['api_key'=>env('KHFY_API_KEY'), 'produk'=>$selected->kode_layanan, 'tujuan'=>$tjn, 'reff_id'=>$refId]);
+                                if (!isset($res->json()['ok']) || $res->json()['ok'] !== false) { $is_success = true; $sn_msg = 'Antrian Khfy'; }
+                            }
+                        } catch (\Exception $e) { $is_success = true; $sn_msg = 'Proses Latar Belakang (Timeout)'; }
+                        
+                        if ($is_success) {
+                            DB::table('transaksi')->insert(['username'=>$user->name,'ref_id'=>$refId,'kode_layanan'=>$selected->kode_layanan,'tujuan'=>$tjn,'harga'=>$selected->harga_jual,'status'=>'Proses','sn'=>$sn_msg,'tanggal'=>now(),'created_at'=>now(),'updated_at'=>now()]);
+                            $berhasil++;
+                        } else {
+                            // Jika gagal langsung saat order, masukkan is_refunded biar aman.
+                            DB::table('transaksi')->insert(['username'=>$user->name,'ref_id'=>$refId,'kode_layanan'=>$selected->kode_layanan,'tujuan'=>$tjn,'harga'=>$selected->harga_jual,'status'=>'Gagal','sn'=>$sn_msg,'tanggal'=>now(),'created_at'=>now(),'updated_at'=>now()]);
+                            DB::table('users')->where('id', $user->id)->increment('saldo', $selected->harga_jual);
+                            $gagal++; $sisa_saldo_realtime += $selected->harga_jual;
+                        }
+                    }
+                    if ($berhasil > 0) {
+                        $msg = "🚀 *ORDER BERHASIL DIPROSES!*\n╭━━━━━━━━━━━━━━━━━━━━━━\n│ 📦 Produk: *{$selected->nama_layanan}*\n│ ✅   Berhasil: *$berhasil*\n";
+                        if ($gagal > 0) $msg .= "│ ❌   Gagal/Refund: *$gagal*\n";
+                        $msg .= "└┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n_Mohon tunggu, pesanan sedang dikirim._";
+                        return response()->json(['status' => true, 'message' => $msg . "\n\n💳 *Sisa Saldo:* Rp " . number_format($sisa_saldo_realtime, 0, ',', '.')]);
+                    } else {
+                        return response()->json(['status'=>false, 'message'=>"❌   *GAGAL PROSES SERVER PUSAT*\nSaldo telah dikembalikan sepenuhnya ke akun Anda.\n\n💳 *Sisa Saldo:* Rp " . number_format($sisa_saldo_realtime, 0, ',', '.')]);
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            return response()->json(['status' => false, 'message' => "🚨 *FATAL ERROR MILASTORE*\nError: " . $e->getMessage()]);
+        }
+    }
+}

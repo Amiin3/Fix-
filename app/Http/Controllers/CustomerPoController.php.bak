@@ -1,0 +1,122 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Inertia\Inertia;
+
+class CustomerPoController extends Controller
+{
+    private function getPrioritas($kode) {
+        $prioritas = [
+            'XLA89' => 1, 'XLA14' => 2, 'XLA39' => 3, 
+            'XLA32' => 4, 'XLA51' => 5, 'XLA65' => 6
+        ];
+        return $prioritas[$kode] ?? 99;
+    }
+
+    public function index()
+    {
+        $list_po_codes = ['XLA89', 'XLA14', 'XLA39', 'XLA32', 'XLA51', 'XLA65'];
+        
+        // 1. Ambil data produk dari database
+        $products = DB::table('layanan_khfy')
+            ->whereIn('kode_layanan', $list_po_codes)
+            ->select('kode_layanan', 'nama_layanan', 'harga_jual')
+            ->get()
+            ->map(function ($item) {
+                $item->prioritas = $this->getPrioritas($item->kode_layanan);
+                return $item;
+            })
+            ->sortBy('prioritas')
+            ->values();
+
+        // 2. Hitung total antrian aktif
+        $total_antri = DB::table('antrian_po')->whereIn('status', ['Menunggu', 'Proses_API'])->count();
+
+        return Inertia::render('Order/PreOrderXla', [
+            'products' => $products,
+            'total_antri' => $total_antri
+        ]);
+    }
+
+    -bash
+        
+        }
+    
+        $request->validate([
+            'kode_produk' => 'required|string',
+            'no_hp' => 'required|string|min:10',
+        ]);
+
+        $user = auth()->user();
+        $kode_produk = $request->kode_produk;
+        $no_hp = preg_replace('/[^0-9]/', '', $request->no_hp);
+
+        try {
+            DB::beginTransaction();
+
+            // A. Cek Harga Produk
+            $produk = DB::table('layanan_khfy')->where('kode_layanan', $kode_produk)->first();
+            if (!$produk) throw new \Exception("Produk PO tidak ditemukan.");
+
+            // B. Kunci Saldo User & Validasi
+            $userDb = DB::table('users')->where('id', $user->id)->lockForUpdate()->first();
+            if ($userDb->saldo < $produk->harga_jual) {
+                throw new \Exception("Saldo tidak cukup. Harga: Rp " . number_format($produk->harga_jual, 0, ',', '.'));
+            }
+
+            // C. Cegah Double Order (Nomor & Produk sama, masih ngantri)
+            $cekAntrian = DB::table('antrian_po')
+                ->where('tujuan', $no_hp)
+                ->where('kode_produk', $kode_produk)
+                ->whereIn('status', ['Menunggu', 'Proses_API'])
+                ->first();
+            if ($cekAntrian) throw new \Exception("Nomor ini sedang dalam antrian untuk produk yang sama!");
+
+            // D. Eksekusi Potong Saldo & Masuk Antrian
+            $ref_id = "PO" . time() . rand(10,99);
+            $prioritas = $this->getPrioritas($kode_produk);
+            $now = now();
+
+            // 1. Potong Saldo
+            DB::table('users')->where('id', $user->id)->decrement('saldo', $produk->harga_jual);
+
+            // 2. Insert ke antrian_po (Gudang Peluru Gatling Gun)
+            DB::table('antrian_po')->insert([
+                'ref_id' => $ref_id,
+                'username' => $user->name,
+                'kode_produk' => $kode_produk,
+                'tujuan' => $no_hp,
+                'harga' => $produk->harga_jual,
+                'status' => 'Menunggu',
+                'prioritas' => $prioritas,
+                'tanggal' => $now,
+                'tanggal' => $now,
+                'updated_at' => $now
+            ]);
+
+            // 3. Insert ke transaksi utama (Agar muncul di Riwayat Pelanggan)
+            DB::table('transaksi')->insert([
+                'ref_id' => $ref_id,
+                'username' => $user->name,
+                'kode_layanan' => $kode_produk,
+                'tujuan' => $no_hp,
+                'harga' => $produk->harga_jual,
+                'status' => 'Pending',
+                'keterangan' => 'Pre-Order War Stok XLA',
+                'tanggal' => $now,
+                'tanggal' => $now,
+                'updated_at' => $now
+            ]);
+
+            DB::commit();
+            return back()->with('success', '✅ Berhasil masuk antrian PO! Silakan pantau di menu riwayat.');
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return back()->with('error', $e->getMessage());
+        }
+    }
+}

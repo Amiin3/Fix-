@@ -1,0 +1,116 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\User;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
+use Inertia\Inertia;
+
+class AdminNotificationController extends Controller
+{
+    public function index() { return Inertia::render('Admin/Notification/Index'); }
+
+    public function send(Request $request)
+    {
+        $request->validate([
+            'title' => 'required|string',
+            'message' => 'required|string',
+            'type' => 'required'
+        ]);
+
+        try {
+            // 1. Ambil member yang punya Alamat HP (Token)
+            $usersWithToken = User::whereNotNull('push_token')->get();
+            $allUsers = User::all();
+
+            // 2. Simpan ke Database (Notifikasi Web) - Tetap Jalan
+            foreach ($allUsers as $user) {
+                $user->notify(new \App\Notifications\PoNotification([
+                    'title' => $request->title,
+                    'message' => $request->message,
+                    'type' => $request->type
+                ]));
+            }
+
+            // 3. Kirim ke Android (Hanya yang ada Tokennya)
+            if ($usersWithToken->count() > 0) {
+                $this->sendPush($request->title, $request->message, $usersWithToken);
+            }
+
+            return redirect()->back()->with('success', 'Broadcast terkirim!');
+
+        } catch (\Exception $e) {
+            Log::error("BROADCAST ERROR: " . $e->getMessage());
+            return redirect()->back()->with('error', 'Terjadi kesalahan sistem.');
+        }
+    }
+
+    private function sendPush($title, $body, $users)
+    {
+        $file = storage_path('app/firebase-auth.json');
+        if (!file_exists($file)) {
+            Log::error("FCM ERROR: File firebase-auth.json tidak ditemukan!");
+            return;
+        }
+
+        $auth = json_decode(file_get_contents($file), true);
+        $accessToken = $this->getGoogleAccessToken($auth);
+
+        foreach ($users as $user) {
+            try {
+                $tokenData = json_decode($user->push_token, true);
+                $target = $tokenData['token'] ?? ($tokenData['endpoint'] ?? null);
+
+                if (!$target) continue;
+
+                $response = Http::withToken($accessToken)->post("https://fcm.googleapis.com/v1/projects/{$auth['project_id']}/messages:send", [
+                    'message' => [
+                        'token' => $target,
+                        'notification' => ['title' => $title, 'body' => $body],
+                        'webpush' => [
+                            'fcm_options' => ['link' => 'https://amifistore.web.id/notifikasi']
+                        ]
+                    ]
+                ]);
+
+                if ($response->failed()) {
+                    Log::warning("FCM Warning for user {$user->name}: " . $response->body());
+                }
+            } catch (\Exception $e) {
+                Log::error("FCM Loop Error: " . $e->getMessage());
+            }
+        }
+    }
+
+    private function getGoogleAccessToken($auth)
+    {
+        $header = base64url_encode(json_encode(['alg' => 'RS256', 'typ' => 'JWT']));
+        $now = time();
+        $payload = base64url_encode(json_encode([
+            'iss' => $auth['client_email'],
+            'scope' => 'https://www.googleapis.com/auth/cloud-platform',
+            'aud' => 'https://oauth2.googleapis.com/token',
+            'exp' => $now + 3600,
+            'iat' => $now
+        ]));
+
+        openssl_sign("$header.$payload", $signature, $auth['private_key'], OPENSSL_ALGO_SHA256);
+        $base64UrlSignature = base64url_encode($signature);
+
+        $response = Http::asForm()->post('https://oauth2.googleapis.com/token', [
+            'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+            'assertion' => "$header.$payload.$base64UrlSignature"
+        ]);
+
+        return $response->json()['access_token'];
+    }
+}
+
+// Helper function untuk JWT
+if (!function_exists('base64url_encode')) {
+    function base64url_encode($data) {
+        return str_replace(['+', '/', '='], ['-', '_', ''], base64_encode($data));
+    }
+}

@@ -1,0 +1,68 @@
+<?php
+namespace App\Http\Controllers\Order;
+
+use App\Http\Controllers\Controller;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Cache;
+
+class OrderController extends Controller {
+    public function place(Request $request, \App\Services\AdammediaService $srv) {
+        $user = $request->user();
+        if (!$user) return response()->json(['success' => false, 'message' => 'Sesi habis.']);
+
+        // Gembok 5 detik
+        $lock = Cache::lock('order_lock_' . $user->id, 5);
+        if (!$lock->get()) return response()->json(['success' => false, 'message' => 'Sabar Bos...']);
+
+        try {
+            // 1. Tes Koneksi Database Manual
+            DB::connection()->getPdo();
+
+            $p = DB::table('ppob_products')->where('product_code', $request->product_code)->first();
+            if (!$p) throw new \Exception('Produk ['.$request->product_code.'] Tidak Ketemu di Tabel!');
+
+            if ($user->saldo < $p->price_sell) throw new \Exception('Saldo Kurang!');
+
+            $refId = 'MILA' . time();
+            
+            DB::beginTransaction();
+            DB::table('users')->where('id', $user->id)->decrement('saldo', $p->price_sell);
+            
+            $trxId = DB::table('transaksi')->insertGetId([
+                'ref_id'       => $refId,
+                'username'     => $user->name,
+                'kode_layanan' => $p->product_code,
+                'tujuan'       => $request->target,
+                'harga'        => (int)$p->price_sell,
+                'status'       => 'Pending',
+                'sku'          => 'ADAMMEDIA',
+                'created_at'   => now(),
+                'updated_at'   => now()
+            ]);
+            DB::commit();
+
+            // Tembak API
+            $res = $srv->placeOrder($refId, $request->target, $p->product_code);
+            
+            DB::table('transaksi')->where('id', $trxId)->update([
+                'status' => $res['status'] ?? 'PROSES',
+                'sn'     => $res['sn'] ?? 'PROSES'
+            ]);
+
+            $lock->release();
+            return response()->json(['success' => true, 'message' => 'Berhasil!']);
+
+        } catch (\Exception $e) {
+            if (DB::transactionLevel() > 0) DB::rollBack();
+            $lock->release();
+            
+            // 🔥 KITA TAMPILKAN DOSA ASLINYA KE LAYAR
+            return response()->json([
+                'success' => false, 
+                'message' => 'KIRIM KE AI -> ' . $e->getMessage() . ' (Line: '.$e->getLine().')'
+            ]);
+        }
+    }
+}

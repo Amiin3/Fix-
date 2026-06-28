@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "132328566926",
+    "project_id": "amifistore",
+    "storage_bucket": "amifistore.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:132328566926:android:b81519150c6136449199df",
+        "android_client_info": {
+          "package_name": "id.web.amifistore.twa"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyClUq-PDP1-S0aqipvI0zLEfMw2zqDXzMI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

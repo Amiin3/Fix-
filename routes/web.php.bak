@@ -1,0 +1,286 @@
+<?php
+use Illuminate\Support\Facades\Route;
+// ==========================================
+// 🌐 1. JALUR PUBLIK & WEBHOOKS
+// ==========================================
+Route::get('/', function () { return \Inertia\Inertia::render('Welcome');
+})->name('home');
+Route::get('/bantuan', function () { return inertia('Bantuan'); })->name('bantuan');
+Route::get('/maintenance', [\App\Http\Controllers\MaintenanceController::class, 'index'])->name('maintenance.index');
+Route::get('/areaxl', [\App\Http\Controllers\PublicToolsController::class, 'index'])->name('public.areaxl');
+Route::get('/developer/api-docs', function () { return \Inertia\Inertia::render('Developer/ApiDocs'); })->name('developer.api');
+Route::get('/developer/payment-gateway-docs', function () { return \Inertia\Inertia::render('Developer/PaymentDocs'); })->name('payment.gateway.doc');
+// Webhook & Callback
+Route::any('/hook-khfy', [\App\Http\Controllers\WebhookKhfyController::class, 'handle']);
+Route::any('/webhook/deposit', [\App\Http\Controllers\Webhook\DepositController::class, 'handle']);
+Route::any('/api/callback/adammedia', [\App\Http\Controllers\Api\WebhookAdammediaController::class, 'handle']);
+Route::post('/api/webhook/android', [\App\Http\Controllers\AndroidWebhookController::class, 'handle']);
+// Otentikasi Google
+Route::get('auth/google', [\App\Http\Controllers\Auth\GoogleController::class, 'redirectToGoogle'])->name('google.login');
+Route::get('auth/google/callback', [\App\Http\Controllers\Auth\GoogleController::class, 'handleGoogleCallback']);
+// Invoice & API Gateway
+Route::get('/checkout/v1/{id}', [\App\Http\Controllers\Api\PaymentGatewayController::class, 'renderInvoice']);
+Route::post('/api/gateway/cancel/{id}', [\App\Http\Controllers\Api\PaymentGatewayController::class, 'cancelTransaction']);
+Route::get('/api/theme/status', [\App\Http\Controllers\ThemeController::class, 'getTheme']);
+// ==========================================
+// 🛡️ 2. FITUR CEK KUOTA (PUBLIK & PROXY SPAM PROTECTED)
+// ==========================================
+Route::get('/order/cek-kuota', function () {
+    return inertia('Order/CekKuota', ['userBalance' => auth()->check() ? auth()->user()->balance : 0]);
+})->name('order.cek-kuota');
+Route::get('/order/akrab/check-stock', [\App\Http\Controllers\AkrabOrderController::class, 'checkStock'])->name('order.akrab.check-stock');
+Route::get('/order/xda/check-stock', [\App\Http\Controllers\AkrabOrderController::class, 'checkStockXda'])->name('order.xda.check-stock');
+Route::post('/proxy/cek-kuota', function (\Illuminate\Http\Request $request) {
+    $timestamp = round(microtime(true) * 1000);
+    $response = \Illuminate\Support\Facades\Http::withHeaders([
+        'Authorization' => 'Basic c2lkb21wdWxhcGk6YXBpZ3drbXNw', 'X-API-Key' => '60ef29aa-a648-4668-90ae-20951ef90c55', 'X-App-Version' => '4.0.0',
+        'Accept' => 'application/json, text/javascript, */*; q=0.01', 'Content-Type' => 'application/x-www-form-urlencoded',
+        'Origin' => 'https://sidompul.kmsp-store.com', 'Referer' => 'https://sidompul.kmsp-store.com/',
+        'User-Agent' => 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36'
+    ])->get("https://apigw.kmsp-store.com/sidompul/v4/cek_kuota", ['msisdn' => $request->input('msisdn'), 'isJSON' => 'true', '_' => $timestamp]);
+    return response()->json($response->json());
+})->middleware('throttle:5,4');
+// Simulasi Harga Sultan
+Route::get('/test-harga', function () {
+    $potongan = ['khfy' => 1000, 'adam' => 500, 'kaje' => 2000, 'digiflazz' => 0];
+    $produkKhfy = \Illuminate\Support\Facades\DB::table('layanan_khfy')->where('status', 'active')->first();
+    $produkAdam = \Illuminate\Support\Facades\DB::table('ppob_products')->where('is_active', 1)->first();
+    $produkKaje = \Illuminate\Support\Facades\DB::table('layanan_kaje')->where('status', 'active')->first();
+    $hitungHarga = function ($hargaAsli, $provider, $level) use ($potongan) { return ($level === 'reseller') ? max($hargaAsli - ($potongan[$provider] ?? 0), 0) : $hargaAsli; };
+    return response()->json([
+        'SIMULASI_USER_BIASA' => ['khfy' => $hitungHarga($produkKhfy->harga_jual ?? 0, 'khfy', 'user'), 'adam' => $hitungHarga($produkAdam->price_sell ?? 0, 'adam', 'user'), 'kaje' => $hitungHarga($produkKaje->harga_jual ?? 0, 'kaje', 'user')],
+        'SIMULASI_RESELLER' => ['khfy' => $hitungHarga($produkKhfy->harga_jual ?? 0, 'khfy', 'reseller'), 'adam' => $hitungHarga($produkAdam->price_sell ?? 0, 'adam', 'reseller'), 'kaje' => $hitungHarga($produkKaje->harga_jual ?? 0, 'kaje', 'reseller')]
+    ]);
+});
+// ==========================================
+// 🚀 3. AREA MEMBER (AUTHENTICATED)
+// ==========================================
+Route::middleware(['auth', 'verified'])->group(function () {
+    Route::get('/dashboard', [\App\Http\Controllers\DashboardController::class, 'index'])->name('dashboard');
+    Route::get('/riwayat', [\App\Http\Controllers\RiwayatController::class, 'index'])->name('riwayat');
+    // Deposit
+    Route::get('/deposit', [\App\Http\Controllers\DepositController::class, 'index'])->name('deposit.index');
+    Route::post('/deposit', [\App\Http\Controllers\DepositController::class, 'store'])->name('deposit.store');
+    Route::post('/deposit/cancel', [\App\Http\Controllers\DepositController::class, 'cancel'])->name('deposit.cancel');
+    Route::get('/deposit/{id}/status', [\App\Http\Controllers\DepositController::class, 'status'])->name('deposit.status');
+    // Profil & Keamanan
+    Route::get('/profile', [\App\Http\Controllers\ProfileController::class, 'edit'])->name('profile.edit');
+    Route::patch('/profile', [\App\Http\Controllers\ProfileController::class, 'update'])->name('profile.update');
+    Route::delete('/profile', [\App\Http\Controllers\ProfileController::class, 'destroy'])->name('profile.destroy');
+    Route::post('/profile-upload-murni', [\App\Http\Controllers\ProfileController::class, 'updateMurni'])->name('profile.update.murni');
+    Route::put('/profile/pin', [\App\Http\Controllers\SecurityController::class, 'updatePin'])->name('profile.pin.update');
+    Route::post('/verify-pin', [\App\Http\Controllers\SecurityController::class, 'verifyPin'])->middleware('throttle:5,5');
+    // Notifikasi & Promo
+    Route::get('/notifikasi', [\App\Http\Controllers\NotifikasiController::class, 'index'])->name('notifikasi.index');
+    Route::post('/notifikasi/{id}/read', [\App\Http\Controllers\NotifikasiController::class, 'markAsRead']);
+    Route::post('/notifikasi/read-all', [\App\Http\Controllers\NotifikasiController::class, 'markAllAsRead']);
+    Route::post('/api/save-push-token', function (\Illuminate\Http\Request $request) { $u = auth()->user(); $u->push_token = $request->token; $u->save(); return response()->json(['success' => true]); });
+    Route::post('/api/remove-push-token', function () { $u = auth()->user(); $u->push_token = null; $u->save(); return response()->json(['success' => true]); });
+    Route::get('/api/site-notifications', function () { return \Illuminate\Support\Facades\DB::table('site_notifications')->orderBy('created_at', 'desc')->limit(10)->get(); });
+    Route::post('/api/site-notifications/read-all', function () { \Illuminate\Support\Facades\DB::table('site_notifications')->where('is_read', false)->update(['is_read' => true]); return response()->json(['status' => 'success']); });
+    Route::get('/api/get-my-notifications', function () { return \Illuminate\Support\Facades\DB::table('notifications')->orderBy('created_at', 'desc')->limit(10)->get()->map(function ($n) { $n->data = json_decode($n->data); return $n; }); });
+    Route::post('/api/read-my-notifications', function () { \Illuminate\Support\Facades\DB::table('notifications')->whereNull('read_at')->update(['read_at' => now()]); return response()->json(['status' => 'success']); });
+    Route::get('/api/get-unread-count', function (\Illuminate\Http\Request $r) { return response()->json(['count' => \Illuminate\Support\Facades\DB::table('notifications')->where('notifiable_id', $r->user()->id)->whereNull('read_at')->count()]); });
+    Route::post('/promo', [\App\Http\Controllers\PromoController::class, 'store']);
+    Route::get('/api/active-promos', function() { return response()->json(\Illuminate\Support\Facades\DB::table('promos')->where('is_active', true)->orderBy('id', 'desc')->get()); });
+    // Referral
+    Route::get('/referral', [\App\Http\Controllers\ReferralController::class, 'index'])->name('referral.index');
+    Route::post('/referral/cairkan', [\App\Http\Controllers\ReferralController::class, 'cairkan'])->name('referral.cairkan');
+    // War Engine & Submits
+    Route::post('/user/po-kaje/submit', [\App\Http\Controllers\UserPoKajeController::class, 'submitPoKaje']);
+    Route::get('/war-xla/sikat', [\App\Http\Controllers\CustomerPoController::class, 'index'])->name('war.xla.index');
+    Route::post('/war-xla/sikat', [\App\Http\Controllers\CustomerPoController::class, 'store'])->name('war.xla.store');
+    Route::post('/api/order/masa-aktif/proses', [\App\Http\Controllers\OrderMasaAktifController::class, 'store']);
+    // Order Layanan Umum
+    Route::name('order.')->prefix('order')->group(function () {
+        Route::get('/akrab', [\App\Http\Controllers\AkrabOrderController::class, 'index'])->name('akrab');
+        Route::post('/akrab', [\App\Http\Controllers\AkrabOrderController::class, 'processOrder'])->name('akrab.store');
+        Route::get('/xda', [\App\Http\Controllers\OrderXdaController::class, 'index'])->name('xda');
+        Route::post('/xda', [\App\Http\Controllers\OrderXdaController::class, 'store'])->name('xda.store');
+        Route::post('/xda/poll', [\App\Http\Controllers\OrderXdaController::class, 'checkStock'])->name('xda.poll');
+        Route::post('/xda/poll-status', [\App\Http\Controllers\OrderXdaController::class, 'poll'])->name('xda.poll_status');
+        Route::get('/pulsa', [\App\Http\Controllers\OrderPulsaController::class, 'index'])->name('pulsa');
+        Route::post('/pulsa/order', [\App\Http\Controllers\OrderPulsaController::class, 'store'])->name('pulsa.store');
+        Route::get('/ewallet', [\App\Http\Controllers\OrderEwalletController::class, 'index'])->name('ewallet');
+        Route::post('/ewallet', [\App\Http\Controllers\OrderEwalletController::class, 'store'])->name('ewallet.store');
+        Route::get('/data', [\App\Http\Controllers\OrderDataController::class, 'index'])->name('data');
+        Route::post('/data', [\App\Http\Controllers\OrderDataController::class, 'store'])->name('data.store');
+        Route::get('/pln', [\App\Http\Controllers\OrderPlnController::class, 'index'])->name('pln');
+        Route::post('/pln', [\App\Http\Controllers\OrderPlnController::class, 'store'])->name('pln.store');
+        Route::get('/games', [\App\Http\Controllers\OrderGamesController::class, 'index'])->name('games');
+        Route::post('/games', [\App\Http\Controllers\OrderGamesController::class, 'store'])->name('games.store');
+        Route::get('/voucher', [\App\Http\Controllers\OrderVoucherController::class, 'index'])->name('voucher');
+        Route::get('/masa-aktif', [\App\Http\Controllers\OrderMasaAktifController::class, 'index'])->name('masa-aktif');
+        Route::post('/masa-aktif/order', [\App\Http\Controllers\OrderMasaAktifController::class, 'store'])->name('masa-aktif.store');
+        Route::get('/perdana', [\App\Http\Controllers\OrderPerdanaController::class, 'index'])->name('perdana');
+        Route::get('/po-xda', [\App\Http\Controllers\UserPoKajeController::class, 'index'])->name('po-xda.view');
+        Route::post('/po-xda', [\App\Http\Controllers\OrderPoXdaController::class, 'store'])->name('po-xda');
+        Route::get('/pascabayar', [\App\Http\Controllers\PascabayarController::class, 'index'])->name('pascabayar');
+        Route::post('/pascabayar/inquiry', [\App\Http\Controllers\PascabayarController::class, 'inquiry'])->name('pascabayar.inquiry');
+        Route::post('/pascabayar/pay', [\App\Http\Controllers\PascabayarController::class, 'pay'])->name('pascabayar.pay');
+    });
+    // Menu Manajemen XL (Tools)
+    Route::get('/tools/xl', [\App\Http\Controllers\XlToolsController::class, 'index'])->name('tools.xl');
+    Route::post('/tools/xl/get-otp', [\App\Http\Controllers\XlToolsController::class, 'getOtp'])->middleware('throttle:1,1');
+    Route::post('/tools/xl/login-otp', [\App\Http\Controllers\XlToolsController::class, 'loginOtp']);
+    Route::post('/tools/xl/login-sesi', [\App\Http\Controllers\XlToolsController::class, 'loginSesi']);
+    Route::post('/tools/xl/get-info', [\App\Http\Controllers\XlToolsController::class, 'getInfo']);
+    Route::post('/tools/xl/set-lock', [\App\Http\Controllers\XlToolsController::class, 'setLock']);
+    Route::post('/tools/xl/unreg', [\App\Http\Controllers\XlToolsController::class, 'unsubscribe']);
+    Route::get('/tools/xl/list-otp', [\App\Http\Controllers\XlToolsController::class, 'listOtp']);
+    Route::post('/tools/xl/order-otp', [\App\Http\Controllers\XlToolsController::class, 'orderOtp']);
+    // Statistik Member
+    Route::get('/statistik', function () {
+        $auth = auth()->user(); $db = \Illuminate\Support\Facades\DB::class;
+        $total_in = $db::table('deposits')->where('user_id', $auth->id)->whereIn('status', ['success', 'sukses', 'paid', 'Success', 'Paid'])->sum('amount');
+        $total_out = $db::table('transaksi')->where(function($q) use ($auth) { $q->where('username', $auth->email)->orWhere('username', $auth->name); })->whereIn('status', ['success', 'sukses', 'Success', 'Lunas'])->sum('harga');
+        $h_depo = $db::table('deposits')->where('user_id', $auth->id)->select('amount as amt', 'metode as title', 'status', 'created_at', $db::raw("'in' as type"))->orderBy('created_at', 'desc')->limit(5)->get();
+        $h_trans = $db::table('transaksi')->where(function($q) use ($auth) { $q->where('username', $auth->email)->orWhere('username', $auth->name);
+})->select('harga as amt', 'kode_layanan as title', 'status', 'created_at', $db::raw("'out' as type"))->orderBy('created_at', 'desc')->limit(10)->get();
+        return inertia('Statistik', ['saldo_user' => (float) ($auth->saldo ?? 0), 'pemasukan' => (float) $total_in, 'pengeluaran' => (float) $total_out, 'riwayat' => $h_depo->concat($h_trans)->sortByDesc('created_at')->values()->take(15)]);
+    })->name('statistik');
+    // Anti Maling Session & H2H Webhook Setting
+    Route::middleware([\App\Http\Middleware\AntiMalingSession::class])->group(function () {
+        Route::get("/order/vpn", [\App\Http\Controllers\OrderVpnController::class, "index"])->name("order.vpn");
+        Route::post("/order/vpn/proses", [\App\Http\Controllers\OrderVpnController::class, "store"])->name("order.vpn.store");
+        Route::get('/akrabv8', [\App\Http\Controllers\OrderController::class, 'index'])->name('order.akrabv8.lama');
+        Route::post('/akrabv8/process', [\App\Http\Controllers\OrderController::class, 'process']);
+        Route::get('/order/akrabv8', [\App\Http\Controllers\Order\AkrabV8Controller::class, 'index'])->name('order.akrabv8');
+        Route::get('/order/akrabv8/live-stock', [\App\Http\Controllers\Order\AkrabV8Controller::class, 'liveStock'])->name('order.akrabv8.stock');
+        Route::post('/order/place', [\App\Http\Controllers\Order\OrderController::class, 'place'])->middleware('throttle:10,1')->name('order.place');
+        Route::post('/profile/update-h2h', function (\Illuminate\Http\Request $request) {
+            $user = auth()->user();
+            if ($request->action == 'generate') { $user->api_key = 'MS-' . strtoupper(\Illuminate\Support\Str::random(30)); }
+            elseif ($request->action == 'generate_secret') { $user->payment_secret = 'SK-' . strtoupper(\Illuminate\Support\Str::random(32)); }
+            else { $request->validate(['webhook_url' => 'nullable|url|max:255', 'payment_webhook' => 'nullable|url|max:255', 'ip_whitelist' => 'nullable|string|max:255']); $user->webhook_url = $request->webhook_url; $user->payment_webhook = $request->payment_webhook; $user->payment_secret = $request->payment_secret; $user->ip_whitelist = $request->ip_whitelist ? preg_replace('/\s+/', '', $request->ip_whitelist) : null; }
+            $user->save(); return response()->json(['status' => true, 'message' => 'H2H Berhasil Disinkronkan!']);
+        });
+        Route::post('/user/test-webhook', function (\Illuminate\Http\Request $request) {
+            $user = auth()->user(); $targetUrl = $request->input('custom_url') ?: ($user ? $user->webhook_url : null); if (empty($targetUrl)) return response()->json(['success' => false, 'message' => 'Masukkan URL!']);
+            $statusReq = $request->input('status', 'Sukses'); $ref_id = 'TEST-WEBHOOK-' . time(); $sn = $statusReq === 'Sukses' ? 'SN-TEST-123' : '';
+            try { $response = \Illuminate\Support\Facades\Http::timeout(10)->withoutVerifying()->post($targetUrl, ['status' => $statusReq, 'trx_id'
+=> $ref_id, 'ref_id' => $ref_id, 'kode_produk' => 'TEST_PRODUK', 'tujuan'
+=> '081234567890', 'sn' => $sn, 'message' => 'Transaksi '.$statusReq, 'signature' => md5(($user ? $user->api_key : 'APIKEY') . $ref_id)]); return response()->json(['success' => true, 'message' => 'Terkirim!', 'http_code' => $response->status(), 'response_body' => substr($response->body(), 0, 200)]); } catch (\Exception $e) { return response()->json(['success' => false, 'message' => 'Gagal: ' . $e->getMessage()]); }
+        });
+    });
+});
+// ==========================================
+// 👑 4. JALUR COMMAND CENTER ADMIN
+// ==========================================
+Route::middleware(['auth', 'verified', \App\Http\Middleware\IsAdmin::class])->prefix('admin')->name('admin.')->group(function () {
+    Route::get('/dashboard', [\App\Http\Controllers\AdminController::class, 'index'])->name('dashboard');
+    Route::get('/keuangan', [\App\Http\Controllers\AdminController::class, 'index'])->name('keuangan');
+    Route::get('/audit', [\App\Http\Controllers\Admin\AuditController::class, 'index'])->name('audit.index');
+    Route::post('/audit', [\App\Http\Controllers\Admin\AuditController::class, 'index']);
+    // Admin Users
+    Route::get('/users', [\App\Http\Controllers\AdminUserController::class, 'index'])->name('users');
+    Route::post('/users/{id}/update-info', [\App\Http\Controllers\AdminUserController::class, 'updateInfo']);
+    Route::post('/users/{id}/balance', [\App\Http\Controllers\AdminUserController::class, 'updateBalance']);
+    Route::post('/users/{id}/password', [\App\Http\Controllers\AdminUserController::class, 'updatePassword']);
+    Route::post('/users/{id}/level', [\App\Http\Controllers\AdminUserController::class, 'updateLevel']);
+    Route::post('/users/{id}/suspend', [\App\Http\Controllers\AdminUserController::class, 'toggleSuspend']);
+    Route::delete('/users/{id}', [\App\Http\Controllers\AdminUserController::class, 'destroy']);
+    Route::post('/users/{id}/update-h2h', function (\Illuminate\Http\Request $request, $id) { $u = \App\Models\User::findOrFail($id); $u->api_key =
+$request->api_key; $u->ip_whitelist = $request->ip_whitelist; $u->webhook_url = $request->webhook_url; $u->save(); return response()->json(['status' => true]); });
+    // Admin Deposit
+    Route::get('/deposit', [\App\Http\Controllers\AdminDepositController::class, 'index'])->name('deposit.index');
+    Route::post('/deposit/process', [\App\Http\Controllers\AdminDepositController::class, 'process'])->name('deposit.process');
+    Route::post('deposit/qris-save', [\App\Http\Controllers\AdminDepositController::class, 'store'])->name('deposit.qris');
+    Route::post('deposit/bank', [\App\Http\Controllers\AdminDepositController::class, 'updateBank'])->name('deposit.bank');
+    Route::post('deposit/{id}/action', [\App\Http\Controllers\AdminDepositController::class, 'handleAction'])->name('deposit.action');
+    // Admin Hesda
+    Route::get('/hesda', [\App\Http\Controllers\Admin\HesdaController::class, 'index'])->name('hesda.index');
+    Route::get('/hesda/api/balance', [\App\Http\Controllers\Admin\HesdaController::class, 'fetchBalance']);
+    Route::get('/hesda/api/packages', [\App\Http\Controllers\Admin\HesdaController::class, 'fetchPackages']);
+    Route::post('/hesda/api/order', [\App\Http\Controllers\Admin\HesdaController::class, 'executeOrder']);
+    Route::get('/hesda/api/stock', [\App\Http\Controllers\Admin\HesdaController::class, 'fetchStock']);
+    // Admin KHFY
+    Route::get('/khfy', [\App\Http\Controllers\AdminKhfyController::class, 'index'])->name('khfy.index');
+    Route::get('/khfy/war', [\App\Http\Controllers\AdminKhfyController::class, 'warPoIndex'])->name('khfy.war.index');
+    Route::get('/khfy/war-po', [\App\Http\Controllers\AdminKhfyController::class, 'warPoIndex'])->name('khfy.war.po');
+    Route::post('/khfy/bulk', [\App\Http\Controllers\AdminKhfyController::class, 'bulk'])->name('khfy.bulk');
+    Route::post('/khfy/sync', [\App\Http\Controllers\AdminKhfyController::class, 'sync'])->name('khfy.sync');
+    Route::post('/khfy/war-engine/execute', [\App\Http\Controllers\AdminKhfyController::class, 'warExecute'])->name('khfy.warengine.execute');
+    Route::post('/khfy/war-engine/list', [\App\Http\Controllers\AdminKhfyController::class, 'warList'])->name('khfy.warengine.list');
+    Route::post('/khfy/war-engine/action', [\App\Http\Controllers\AdminKhfyController::class, 'warAction'])->name('khfy.warengine.action');
+    // Admin KAJE
+    Route::get('/kaje', [\App\Http\Controllers\AdminKajeController::class, 'index'])->name('kaje.index');
+    Route::prefix('kaje')->name('kaje.')->group(function () {
+        Route::post('/update', [\App\Http\Controllers\AdminKajeController::class, 'update'])->name('update');
+        Route::post('/mass-update', [\App\Http\Controllers\AdminKajeController::class, 'massUpdate'])->name('mass-update');
+        Route::post('/sync', [\App\Http\Controllers\AdminKajeController::class, 'sync'])->name('sync');
+        Route::delete('/{id}', [\App\Http\Controllers\AdminKajeController::class, 'destroy'])->name('destroy');
+        Route::get('/war', [\App\Http\Controllers\AdminKajeWarController::class, 'index'])->name('war.index');
+        Route::get('/war/logs', [\App\Http\Controllers\AdminKajeWarController::class, 'getLogs'])->name('war.logs');
+        Route::post('/war/poll', [\App\Http\Controllers\AdminKajeWarController::class, 'pollStatus'])->name('war.poll');
+        Route::post('/war/update', [\App\Http\Controllers\AdminKajeWarController::class, 'updateStatus'])->name('war.update');
+    });
+    Route::get('/api/kaje/list', [\App\Http\Controllers\AdminKajeWarController::class, 'getQueue'])->name('kaje.war.list');
+    Route::post('/api/kaje/action', [\App\Http\Controllers\AdminKajeWarController::class, 'actionDewa'])->name('kaje.war.action');
+    Route::post('/kaje-war/sync', [\App\Http\Controllers\AdminKajeWarController::class, 'syncPending'])->name('kaje.sync_final');
+    // Digiflazz & Promo
+    Route::get('/digiflazz', [\App\Http\Controllers\AdminDigiflazzController::class, 'index'])->name('digiflazz.index');
+    Route::post('/digiflazz/sync', [\App\Http\Controllers\AdminDigiflazzController::class, 'sync'])->name('digiflazz.sync');
+    Route::get('/promo', [\App\Http\Controllers\PromoController::class, 'index'])->name('promo.index');
+    Route::post('/promo', [\App\Http\Controllers\PromoController::class, 'store'])->name('promo.store');
+    // Setting & Broadcast
+    Route::post('/theme/save', [\App\Http\Controllers\ThemeController::class, 'saveTheme']);
+    Route::get('/maintenance-settings', [\App\Http\Controllers\MaintenanceController::class, 'adminPage'])->name('maintenance.index');
+    Route::post('/maintenance-settings', [\App\Http\Controllers\MaintenanceController::class, 'save'])->name('maintenance.save');
+    Route::get('/reseller-discounts', [\App\Http\Controllers\Admin\ResellerDiscountController::class, 'index'])->name('reseller.discounts');
+    Route::post('/reseller-discounts', [\App\Http\Controllers\Admin\ResellerDiscountController::class, 'update'])->name('reseller.discounts.update');
+    Route::get('/payment-settings', [\App\Http\Controllers\Admin\PaymentSettingController::class, 'index']);
+    Route::post('/payment-settings', [\App\Http\Controllers\Admin\PaymentSettingController::class, 'store']);
+    Route::get("/transaksi", [\App\Http\Controllers\AdminTransactionController::class, "index"])->name("transaksi.index");
+    Route::post("/transaksi/{id}/status", [\App\Http\Controllers\AdminTransactionController::class, "updateStatus"]);
+    Route::get("/broadcast", [\App\Http\Controllers\AdminNotificationController::class, "index"])->name("broadcast");
+    Route::post("/broadcast/send", [\App\Http\Controllers\AdminNotificationController::class, "send"]);
+    // Dynamic Menus
+    Route::get('/api/menus/list', [\App\Http\Controllers\Admin\MenuManagerController::class, 'listMenus']);
+    Route::get('/menus', [\App\Http\Controllers\Admin\MenuManagerController::class, 'index'])->name('menus.index');
+    Route::post('/menus/save', [\App\Http\Controllers\Admin\MenuManagerController::class, 'save']);
+    Route::post('/menus/upload-icon', [\App\Http\Controllers\Admin\MenuManagerController::class, 'uploadIcon']);
+    // Admin PO System
+    Route::post('/po/action', [\App\Http\Controllers\AdminPoManagerController::class, 'action'])->name('po.action');
+    Route::post('/po/toggle-status', function(\Illuminate\Http\Request $request) { \Illuminate\Support\Facades\DB::table('settings')->updateOrInsert(['key' => $request->provider == 'kaje' ? 'war_status_kaje' : 'war_status'], ['value' => $request->status]); return response()->json(['success' => true]); })->name('po.toggle');
+    Route::get('/po-v8', [\App\Http\Controllers\Admin\AdminPOController::class, 'index'])->name('po_v8');
+    Route::post('/po-v8/toggle', [\App\Http\Controllers\Admin\AdminPOController::class, 'toggleMode']);
+    Route::post('/po-v8/retry/{id}', [\App\Http\Controllers\Admin\AdminPOController::class, 'retry']);
+    Route::post('/po-v8/cancel/{id}', [\App\Http\Controllers\Admin\AdminPOController::class, 'cancel']);
+    Route::get('/api/v8/live-stock', function() { return response()->json(\Illuminate\Support\Facades\DB::table('ppob_products')->where('product_code', 'LIKE', '%XDA%')->orWhere('product_code', 'LIKE', '%XCLP%')->get()); });
+    
+    // 👑 AKRAB COMMAND CENTER V12 - FIX ZIGGY ROUTE NAMESPACES
+    Route::get('/akrab', [\App\Http\Controllers\Admin\AkrabManagerController::class, 'index'])->name('akrab.index');
+    Route::get('/akrab/accounts', [\App\Http\Controllers\Admin\AkrabManagerController::class, 'getAccounts'])->name('akrab.accounts');
+    Route::get('/akrab/member-info', [\App\Http\Controllers\Admin\AkrabManagerController::class, 'memberInfo'])->name('akrab.member_info');
+    Route::post('/akrab/req-otp', [\App\Http\Controllers\Admin\AkrabManagerController::class, 'reqOtp'])->name('akrab.req_otp');
+    Route::post('/akrab/submit-otp', [\App\Http\Controllers\Admin\AkrabManagerController::class, 'submitOtp'])->name('akrab.submit_otp');
+    Route::post('/akrab/delete-manager', [\App\Http\Controllers\Admin\AkrabManagerController::class, 'deleteManager'])->name('akrab.delete_manager');
+    Route::post('/akrab/sync', [\App\Http\Controllers\Admin\AkrabManagerController::class, 'syncAccount'])->name('akrab.sync');
+    Route::post('/akrab/action', [\App\Http\Controllers\Admin\AkrabManagerController::class, 'handleAction'])->name('akrab.action');
+});
+// ==========================================
+// 📱 5. SISTEM OTP WHATSAPP
+// ==========================================
+Route::get('/verify-otp', [\App\Http\Controllers\Auth\OtpController::class, 'show'])->name('otp.verify');
+Route::post('/verify-otp', [\App\Http\Controllers\Auth\OtpController::class, 'verify'])->name('otp.check')->middleware('throttle:3,1');
+Route::get('/setup-whatsapp', [\App\Http\Controllers\Auth\OtpController::class, 'setup'])->name('whatsapp.setup');
+Route::post('/setup-whatsapp', [\App\Http\Controllers\Auth\OtpController::class, 'sendOtp'])->name('whatsapp.send')->middleware('throttle:1,1');
+require __DIR__.'/auth.php';
+
+// =========================================================================
+// REGISTERED AUTOMATICALLY: MILA STORE AKRAB MANAGER ROUTES (v4.0)
+// =========================================================================
+Route::middleware(['web'])->prefix('admin/akrab-enterprise')->name('admin.akrab.')->group(function () {
+    Route::get('/', [App\Http\Controllers\Admin\AkrabEnterpriseController::class, 'index'])->name('index');
+    Route::get('/slots/{msisdn}', [App\Http\Controllers\Admin\AkrabEnterpriseController::class, 'viewSlots'])->name('slots');
+    Route::post('/req-otp', [App\Http\Controllers\Admin\AkrabEnterpriseController::class, 'reqOtp'])->name('req-otp');
+    Route::post('/submit-otp', [App\Http\Controllers\Admin\AkrabEnterpriseController::class, 'submitOtp'])->name('submit-otp');
+    Route::post('/delete-pengelola', [App\Http\Controllers\Admin\AkrabEnterpriseController::class, 'deletePengelola'])->name('delete-pengelola');
+    Route::post('/ajax-sync-slot', [App\Http\Controllers\Admin\AkrabEnterpriseController::class, 'ajaxSyncSlot'])->name('sync-slot');
+    Route::post('/retry-failed', [App\Http\Controllers\Admin\AkrabEnterpriseController::class, 'retryFailedKuber'])->name('retry-failed');
+    Route::post('/cek-pulsa', [App\Http\Controllers\Admin\AkrabEnterpriseController::class, 'cekPulsa'])->name('cek-pulsa');
+    Route::post('/map-slot', [App\Http\Controllers\Admin\AkrabEnterpriseController::class, 'mapSlot'])->name('map-slot');
+    Route::post('/kick-member', [App\Http\Controllers\Admin\AkrabEnterpriseController::class, 'kickMember'])->name('kick-member');
+    Route::post('/force-kuber', [App\Http\Controllers\Admin\AkrabEnterpriseController::class, 'forceKuber'])->name('force-kuber');
+});

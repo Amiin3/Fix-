@@ -1,0 +1,77 @@
+<?php
+namespace App\Http\Controllers;
+
+use Illuminate\Http\Request;
+use App\Models\PpobProduct;
+use App\Models\PpobTransaction;
+use App\Models\User;
+use App\Services\AdammediaService;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Auth;
+
+class OrderController extends Controller {
+    public function index() {
+        $products = PpobProduct::where('provider_name', 'ADAMMEDIA')->where('is_active', 1)->get();
+        
+        // 🚀 BACA LEVEL REAL-TIME
+        $userLevel = 'member';
+        if (Auth::check()) {
+            $userLevel = DB::table('users')->where('id', Auth::id())->value('level') ?? 'member';
+        }
+
+        // 🚀 SUNTIK DISKON KE TAMPILAN
+        $products->transform(function($p) use ($userLevel) {
+            $p->price_sell = $this->hitungHargaReseller($p->price_sell, $p->price_buy ?? 0, 'adam', $userLevel);
+            return $p;
+        });
+
+        $groupedProducts = $products->groupBy('category');
+        return view('order', compact('groupedProducts'));
+    }
+
+    public function process(Request $request) {
+        $user = User::find(Auth::id());
+        $product = PpobProduct::where('product_code', $request->product_code)->first();
+        
+        // 🚀 BACA LEVEL & HITUNG HARGA FIX TRANSAKSI
+        $userLevel = DB::table('users')->where('id', $user->id)->value('level') ?? 'member';
+        $hargaAkhir = $this->hitungHargaReseller($product->price_sell ?? 0, $product->price_buy ?? 0, 'adam', $userLevel);
+
+        if (!$product || $user->saldo < $hargaAkhir) {
+            return back()->with('trx_result', (object)['status' => 'GAGAL', 'message' => 'Saldo/Produk Bermasalah']);
+        }
+
+        $refId = 'TRX' . time() . rand(10,99);
+        DB::beginTransaction();
+        try {
+            // 🚀 POTONG SALDO PAKE HARGA DISKON
+            $user->decrement('saldo', $hargaAkhir);
+            $trx = PpobTransaction::create([
+                'username' => $user->name, 'ref_id' => $refId, 'product_code' => $product->product_code,
+                'target' => $request->target, 'price' => $hargaAkhir, 'status' => 'PROSES'
+            ]);
+            DB::commit();
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return back()->with('error', 'Sistem Error');
+        }
+
+        $srv = app(AdammediaService::class);
+        $res = $srv->placeOrder($refId, $request->target, $product->product_code);
+        
+        // SENSOR SALDO & STATUS SYNC (FIX BAWAAN SULTAN)
+        $msg = $res['msg'];
+        if (stripos($msg, 'Saldo') !== false) {
+            $parts = explode('Saldo', $msg);
+            $msg = trim($parts[0]) . ' [MilaStore Sync]';
+        }
+        
+        if ($res['status'] == 'GAGAL') { 
+            // 🚀 KEMBALIKAN SALDO PAKE HARGA DISKON JUGA
+            $user->increment('saldo', $hargaAkhir); 
+        }
+        
+        $trx->update(['status' => $res['status'], 'sn' => $res['sn'], 'message' => $msg]);
+        return back()->with('trx_result', $trx);
+    }
+}
